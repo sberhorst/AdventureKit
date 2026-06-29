@@ -25,7 +25,7 @@
 -- Addon identity
 ------------------------------------------------------------------------
 local ADDON_NAME    = "AdventureKit"
-local ADDON_VERSION = "2.2.0"
+local ADDON_VERSION = "2.2.1"
 local PREFIX        = "|cff00ccff[AdventureKit]|r"
 
 ------------------------------------------------------------------------
@@ -944,7 +944,7 @@ optPanel:SetScript("OnShow", function(self)
     sf:SetPoint("BOTTOMRIGHT", self, "BOTTOMRIGHT", -28,   4)
 
     local content = CreateFrame("Frame", nil, sf)
-    content:SetSize(sf:GetWidth() or 500, 1080)
+    content:SetSize(sf:GetWidth() or 500, 1140)
     sf:SetScrollChild(content)
 
     local function MakeDivider(yPos)
@@ -1034,7 +1034,7 @@ optPanel:SetScript("OnShow", function(self)
         end)
         if sublabel then
             local sl = content:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-            sl:SetPoint("TOPLEFT", content, "TOPLEFT", 48, yPos - 16)
+            sl:SetPoint("TOPLEFT", content, "TOPLEFT", 48, yPos - 20)
             sl:SetText(sublabel)
             sl:SetTextColor(0.5, 0.5, 0.5, 1)
         end
@@ -1042,38 +1042,39 @@ optPanel:SetScript("OnShow", function(self)
     end
 
     MakeSubHeader("Alert when entering", -238)
-    MakeIndentCB("Dungeons (including Mythic+)", "alertInDungeon", -254)
-    MakeIndentCB("Raids",                        "alertInRaid",    -278)
-    MakeIndentCB("Delves",                       "alertInDelve",   -302)
+    MakeIndentCB("Dungeons (including Mythic+)", "alertInDungeon", -256)
+    MakeIndentCB("Raids",                        "alertInRaid",    -282)
+    MakeIndentCB("Delves",                       "alertInDelve",   -308)
 
-    MakeSubHeader("Flask & food", -330)
-    MakeIndentCB("Missing flask",                "alertFlask",     -346)
-    MakeIndentCB("Missing food buff",            "alertFood",      -370)
-    MakeIndentCB("Missing your buff to party/raid", "alertRaidBuffs", -394)
+    MakeSubHeader("Flask & food", -340)
+    MakeIndentCB("Missing flask",                   "alertFlask",     -358)
+    MakeIndentCB("Missing food buff",               "alertFood",      -384)
+    MakeIndentCB("Missing your buff to party/raid", "alertRaidBuffs", -410)
 
-    MakeSubHeader("Pet", -422)
+    MakeSubHeader("Pet", -442)
     local noEntryNote = content:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-    noEntryNote:SetPoint("TOPLEFT", content, "TOPLEFT", 38, -424)
-    noEntryNote:SetText("BM/Surv Hunter · Warlock · Unholy DK · Frost Mage")
+    noEntryNote:SetPoint("TOPLEFT", content, "TOPLEFT", 38, -458)
+    noEntryNote:SetText("BM/Surv Hunter  ·  Warlock  ·  Unholy DK  ·  Frost Mage")
     noEntryNote:SetTextColor(0.45, 0.45, 0.45, 1)
 
-    MakeIndentCB("No pet summoned on entry", "alertPet", -438,
-        "MM Hunters and non-Unholy DKs are excluded automatically by spec")
-    MakeIndentCB("Pet died mid-run",         "alertPetDeath", -470,
+    -- Pet checkboxes with sublabels: each needs 42px gap (26 checkbox + 16 sublabel)
+    MakeIndentCB("No pet summoned on entry", "alertPet", -476,
+        "MM Hunters and non-Unholy DKs excluded automatically")
+    MakeIndentCB("Pet died mid-run", "alertPetDeath", -518,
         "Fires even when suppress-in-combat is on")
 
-    MakeCheckbox("Suppress alerts while in combat", "muteInCombat", -506)
+    MakeCheckbox("Suppress alerts while in combat", "muteInCombat", -560)
     local muteNote = content:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-    muteNote:SetPoint("TOPLEFT", content, "TOPLEFT", 34, -524)
+    muteNote:SetPoint("TOPLEFT", content, "TOPLEFT", 34, -580)
     muteNote:SetText("Does not suppress pet death alerts")
     muteNote:SetTextColor(0.45, 0.45, 0.45, 1)
 
     -- ON-SCREEN BUFF ALERTS
-    MakeDivider(-542)
-    MakeHeader("On-Screen Buff Alerts", -552)
-    MakeCheckbox("Show flashing alerts on screen", "showBuffHUD", -572)
+    MakeDivider(-600)
+    MakeHeader("On-Screen Buff Alerts", -610)
+    MakeCheckbox("Show flashing alerts on screen", "showBuffHUD", -630)
 
-    local alwaysCB = MakeCheckbox("Always show HUD (not just in instances)", "buffHUDAlwaysShow", -596)
+    local alwaysCB = MakeCheckbox("Always show HUD (not just in instances)", "buffHUDAlwaysShow", -654)
     alwaysCB:SetScript("OnClick", function(btn)
         if db then
             db.buffHUDAlwaysShow = btn:GetChecked()
@@ -1081,15 +1082,15 @@ optPanel:SetScript("OnShow", function(self)
         end
     end)
 
-    MakeCheckbox("Lock HUD position (disable dragging)", "hudLocked", -620)
+    MakeCheckbox("Lock HUD position (disable dragging)", "hudLocked", -678)
 
     -- Scale slider
     local hudScaleLabel = content:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-    hudScaleLabel:SetPoint("TOPLEFT", content, "TOPLEFT", 30, -648)
+    hudScaleLabel:SetPoint("TOPLEFT", content, "TOPLEFT", 30, -706)
     hudScaleLabel:SetText("Alert Scale:")
 
     local hudScaleSlider = CreateFrame("Slider", "AKHudScaleSlider", content, "OptionsSliderTemplate")
-    hudScaleSlider:SetPoint("TOPLEFT", content, "TOPLEFT", 30, -668)
+    hudScaleSlider:SetPoint("TOPLEFT", content, "TOPLEFT", 30, -726)
     hudScaleSlider:SetWidth(200)
     hudScaleSlider:SetMinMaxValues(0.5, 3.0)
     hudScaleSlider:SetValueStep(0.1)
@@ -1105,7 +1106,7 @@ optPanel:SetScript("OnShow", function(self)
     end)
 
     local hudResetBtn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
-    hudResetBtn:SetPoint("TOPLEFT", content, "TOPLEFT", 30, -716)
+    hudResetBtn:SetPoint("TOPLEFT", content, "TOPLEFT", 30, -774)
     hudResetBtn:SetSize(130, 22)
     hudResetBtn:SetText("Reset HUD Position")
     hudResetBtn:SetScript("OnClick", function()
@@ -1117,11 +1118,11 @@ optPanel:SetScript("OnShow", function(self)
     end)
 
     -- SPEED DISPLAY
-    MakeDivider(-742)
-    MakeHeader("Speed Display", -752)
+    MakeDivider(-800)
+    MakeHeader("Speed Display", -810)
 
     local speedHideCB = CreateFrame("CheckButton", nil, content, "UICheckButtonTemplate")
-    speedHideCB:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -772)
+    speedHideCB:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -830)
     speedHideCB:SetChecked(AdventureKitDB and AdventureKitDB.SpeedTracker and AdventureKitDB.SpeedTracker.hidden or false)
     speedHideCB.text:SetText("Hide speed display")
     speedHideCB:SetScript("OnClick", function(btn)
@@ -1129,7 +1130,7 @@ optPanel:SetScript("OnShow", function(self)
     end)
 
     local speedLockCB = CreateFrame("CheckButton", nil, content, "UICheckButtonTemplate")
-    speedLockCB:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -796)
+    speedLockCB:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -854)
     speedLockCB:SetChecked(AdventureKitDB and AdventureKitDB.SpeedTracker and AdventureKitDB.SpeedTracker.locked or false)
     speedLockCB.text:SetText("Lock speed frame position (disable dragging)")
     speedLockCB:SetScript("OnClick", function(btn)
@@ -1137,7 +1138,7 @@ optPanel:SetScript("OnShow", function(self)
     end)
 
     local speedLabelCB = CreateFrame("CheckButton", nil, content, "UICheckButtonTemplate")
-    speedLabelCB:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -820)
+    speedLabelCB:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -878)
     speedLabelCB:SetChecked(AdventureKitDB and AdventureKitDB.SpeedTracker and
         (AdventureKitDB.SpeedTracker.showLabel ~= false) or true)
     speedLabelCB.text:SetText("Show \"Speed\" label beneath percentage")
@@ -1146,11 +1147,11 @@ optPanel:SetScript("OnShow", function(self)
     end)
 
     local scaleLabel = content:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-    scaleLabel:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -850)
+    scaleLabel:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -908)
     scaleLabel:SetText("Frame Scale:")
 
     local scaleSlider = CreateFrame("Slider", "AKSpeedScaleSlider", content, "OptionsSliderTemplate")
-    scaleSlider:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -870)
+    scaleSlider:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -928)
     scaleSlider:SetWidth(220)
     scaleSlider:SetMinMaxValues(0.5, 2.0)
     scaleSlider:SetValueStep(0.05)
@@ -1166,7 +1167,7 @@ optPanel:SetScript("OnShow", function(self)
     end)
 
     local speedResetBtn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
-    speedResetBtn:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -918)
+    speedResetBtn:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -976)
     speedResetBtn:SetSize(140, 22)
     speedResetBtn:SetText("Reset Speed Position")
     speedResetBtn:SetScript("OnClick", function()
@@ -1174,7 +1175,7 @@ optPanel:SetScript("OnShow", function(self)
     end)
 
     local speedVer = content:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-    speedVer:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -948)
+    speedVer:SetPoint("TOPLEFT", content, "TOPLEFT", 10, -1006)
     speedVer:SetText("Speed v" .. (SpeedTrackerAPI and SpeedTrackerAPI.GetVersion() or "?") .. "  |  /speed for quick commands")
     speedVer:SetTextColor(0.5, 0.5, 0.5, 1)
 end)

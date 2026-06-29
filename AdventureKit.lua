@@ -25,7 +25,7 @@
 -- Addon identity
 ------------------------------------------------------------------------
 local ADDON_NAME    = "AdventureKit"
-local ADDON_VERSION = "2.3.0"
+local ADDON_VERSION = "2.3.1"
 local PREFIX        = "|cff00ccff[AdventureKit]|r"
 
 ------------------------------------------------------------------------
@@ -705,207 +705,143 @@ end
 ------------------------------------------------------------------------
 -- FEATURE 6: Cursor Reticle
 --
--- A classic FPS-style reticle that follows the mouse cursor:
---   - Outer ring
---   - Four crosshair lines with a gap at center (so center stays clear)
---   - Small center dot
+-- Classic FPS reticle: outer ring + gapped crosshair + center dot.
+-- Follows the mouse every frame via OnUpdate + GetCursorPosition().
 --
--- Implemented as a pure-Lua drawn frame using WoW's texture/line APIs.
--- GetCursorPosition() returns raw screen coords; divide by UIParent scale
--- to get frame-space coordinates for SetPoint.
---
--- The reticle frame sits on TOOLTIP strata so it's always on top.
--- It hides automatically when the mouse enters interactive UI frames,
--- during combat (optional), and outside instances (optional).
+-- KEY DESIGN RULE: WoW has no DestroyLine() API. Line objects created
+-- with CreateLine() cannot be removed. Therefore ALL line objects are
+-- created ONCE at load time and REUSED forever. Color/size changes call
+-- ApplyReticleStyle() which updates existing objects in-place.
+-- RebuildReticle() is now just ApplyReticleStyle() — no new objects.
 ------------------------------------------------------------------------
+
+local RING_SEGMENTS = 32
 
 local reticleFrame = CreateFrame("Frame", "AdventureKitReticle", UIParent)
 reticleFrame:SetFrameStrata("TOOLTIP")
-reticleFrame:SetSize(1, 1)          -- zero-size anchor; children do the drawing
+reticleFrame:SetSize(200, 200)  -- large enough to contain all line geometry
 reticleFrame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
 reticleFrame:Hide()
 
-------------------------------------------------------------------------
--- Draw helpers — build reticle shapes as sub-textures
-------------------------------------------------------------------------
-
-local function MakeCircleTexture(parent, radius, r, g, b, a)
-    -- WoW cannot natively draw circles via texture alone.
-    -- We approximate a ring using 32 thin line segments (LinePool / Line API).
-    -- In WoW 12.x, CreateLine() on a frame draws a pixel-width vector line.
-    local segments = 32
-    local lines = {}
-    for i = 1, segments do
-        local line = parent:CreateLine(nil, "OVERLAY")
-        line:SetThickness(1.5)
-        line:SetColorTexture(r, g, b, a)
-        lines[i] = line
-    end
-
-    local function UpdateCircle(cx, cy, rad)
-        for i = 1, segments do
-            local a1 = (i - 1) / segments * math.pi * 2
-            local a2 = i / segments * math.pi * 2
-            lines[i]:SetStartPoint("BOTTOMLEFT", parent,
-                cx + rad * math.cos(a1),
-                cy + rad * math.sin(a1))
-            lines[i]:SetEndPoint("BOTTOMLEFT", parent,
-                cx + rad * math.cos(a2),
-                cy + rad * math.sin(a2))
-        end
-    end
-
-    return UpdateCircle
+-- Create ALL line objects exactly once
+local ringLines = {}
+for i = 1, RING_SEGMENTS do
+    local ln = reticleFrame:CreateLine(nil, "OVERLAY")
+    ln:SetThickness(1.5)
+    ringLines[i] = ln
 end
 
-local function MakeLine(parent, r, g, b, a, thickness)
-    local line = parent:CreateLine(nil, "OVERLAY")
-    line:SetThickness(thickness or 1.5)
-    line:SetColorTexture(r, g, b, a)
-    return line
+local lineTop    = reticleFrame:CreateLine(nil, "OVERLAY")
+local lineBottom = reticleFrame:CreateLine(nil, "OVERLAY")
+local lineLeft   = reticleFrame:CreateLine(nil, "OVERLAY")
+local lineRight  = reticleFrame:CreateLine(nil, "OVERLAY")
+lineTop:SetThickness(1.5)
+lineBottom:SetThickness(1.5)
+lineLeft:SetThickness(1.5)
+lineRight:SetThickness(1.5)
+
+local dotTex = reticleFrame:CreateTexture(nil, "OVERLAY")
+dotTex:SetSize(3, 3)
+dotTex:SetPoint("CENTER", reticleFrame, "CENTER", 0, 0)
+
+------------------------------------------------------------------------
+-- Apply color + recompute geometry — called on init and setting changes
+------------------------------------------------------------------------
+local function ApplyReticleStyle()
+    if not db then return end
+    local r  = db.cursorR     or 0.91
+    local g  = db.cursorG     or 0.78
+    local b  = db.cursorB     or 0.29
+    local a  = db.cursorAlpha or 0.85
+    local sz = db.cursorSize  or 32
+
+    -- Color all ring lines
+    for _, ln in ipairs(ringLines) do
+        ln:SetColorTexture(r, g, b, a)
+    end
+    -- Color crosshair lines
+    lineTop:SetColorTexture(r, g, b, a)
+    lineBottom:SetColorTexture(r, g, b, a)
+    lineLeft:SetColorTexture(r, g, b, a)
+    lineRight:SetColorTexture(r, g, b, a)
+    -- Color dot
+    dotTex:SetColorTexture(r, g, b, a)
 end
 
-------------------------------------------------------------------------
--- Reticle components
-------------------------------------------------------------------------
-
--- We store update functions and line references in a table
-local reticle = {
-    updateCircle = nil,
-    lines        = {},  -- crosshair lines: top, bottom, left, right
-    dot          = nil, -- center dot texture
-}
+-- RebuildReticle is now just a style refresh — no new objects created
+local function RebuildReticle()
+    ApplyReticleStyle()
+end
 
 local function BuildReticle()
-    if not db then return end
-
-    -- Clear any existing children
-    -- (Called once at init; not rebuilt unless settings change size/color)
-    local r, g, b = db.cursorR, db.cursorG, db.cursorB
-    local a       = db.cursorAlpha or 0.85
-
-    -- Outer ring via line segments
-    reticle.updateCircle = MakeCircleTexture(reticleFrame,
-        db.cursorSize, r, g, b, a)
-
-    -- Crosshair lines (gap = 30% of radius from center)
-    local gap = math.floor(db.cursorSize * 0.35)
-    local len = math.floor(db.cursorSize * 0.45)
-
-    reticle.lineTop    = MakeLine(reticleFrame, r, g, b, a, 1.5)
-    reticle.lineBottom = MakeLine(reticleFrame, r, g, b, a, 1.5)
-    reticle.lineLeft   = MakeLine(reticleFrame, r, g, b, a, 1.5)
-    reticle.lineRight  = MakeLine(reticleFrame, r, g, b, a, 1.5)
-
-    -- Center dot: small square texture
-    if reticle.dot then reticle.dot:Hide() end
-    reticle.dot = reticleFrame:CreateTexture(nil, "OVERLAY")
-    reticle.dot:SetColorTexture(r, g, b, a)
-    reticle.dot:SetSize(3, 3)
-
-    reticle.gap = gap
-    reticle.len = len
+    ApplyReticleStyle()
 end
 
 ------------------------------------------------------------------------
--- Position update — called every OnUpdate tick
+-- Per-frame update: move frame to cursor and recompute line positions
 ------------------------------------------------------------------------
-local RETICLE_UPDATE = 0.0   -- every frame (cursor must feel instant)
-local reticleElapsed = 0
-
 local function UpdateReticle()
     if not db or not db.cursorEnabled then
-        reticleFrame:Hide()
-        return
+        reticleFrame:Hide(); return
     end
-
-    -- Hide during combat if setting enabled
     if db.cursorHideInCombat and InCombatLockdown() then
-        reticleFrame:Hide()
-        return
+        reticleFrame:Hide(); return
     end
-
-    -- Hide outside instances if setting enabled
     if db.cursorInstanceOnly then
-        local inInstance, iType = IsInInstance()
-        if not inInstance or not AlertsEnabledForType(iType) then
-            reticleFrame:Hide()
-            return
+        local inInst, iType = IsInInstance()
+        if not inInst or not AlertsEnabledForType(iType) then
+            reticleFrame:Hide(); return
         end
     end
-
-    -- Hide when mouse is over a UI element (prevents reticle on top of frames)
+    -- Hide when cursor is over interactive UI (buttons, panels, etc.)
     local focus = GetMouseFocus and GetMouseFocus()
     if focus and focus ~= WorldFrame and focus ~= UIParent then
-        reticleFrame:Hide()
-        return
+        reticleFrame:Hide(); return
     end
 
-    -- Get cursor position in screen pixels, convert to UIParent-relative coords
-    local scale  = UIParent:GetEffectiveScale()
+    local scale = UIParent:GetEffectiveScale()
     local cx, cy = GetCursorPosition()
     if not cx or not cy then reticleFrame:Hide(); return end
 
-    -- Convert to frame-local offset from BOTTOMLEFT of UIParent
+    -- Position the frame so its CENTER is on the cursor
     local fx = cx / scale
     local fy = cy / scale
-
-    -- Move the anchor frame to cursor position
     reticleFrame:ClearAllPoints()
-    reticleFrame:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", fx, fy)
+    reticleFrame:SetPoint("CENTER", UIParent, "BOTTOMLEFT", fx, fy)
 
-    -- Update ring
-    if reticle.updateCircle then
-        reticle.updateCircle(0, 0, db.cursorSize)
-    end
+    -- Geometry values derived from current size setting
+    local sz  = db.cursorSize or 32
+    local gap = sz * 0.35      -- gap from center to start of crosshair line
+    local len = sz * 0.45      -- length of each crosshair arm
 
-    -- Update crosshair lines relative to center (0,0 in frame space = cursor)
-    local gap = reticle.gap or 8
-    local len = reticle.len or 12
-
-    if reticle.lineTop then
-        reticle.lineTop:SetStartPoint("BOTTOMLEFT", reticleFrame, 0, gap)
-        reticle.lineTop:SetEndPoint("BOTTOMLEFT", reticleFrame, 0, gap + len)
-    end
-    if reticle.lineBottom then
-        reticle.lineBottom:SetStartPoint("BOTTOMLEFT", reticleFrame, 0, -gap)
-        reticle.lineBottom:SetEndPoint("BOTTOMLEFT", reticleFrame, 0, -(gap + len))
-    end
-    if reticle.lineLeft then
-        reticle.lineLeft:SetStartPoint("BOTTOMLEFT", reticleFrame, -gap, 0)
-        reticle.lineLeft:SetEndPoint("BOTTOMLEFT", reticleFrame, -(gap + len), 0)
-    end
-    if reticle.lineRight then
-        reticle.lineRight:SetStartPoint("BOTTOMLEFT", reticleFrame, gap, 0)
-        reticle.lineRight:SetEndPoint("BOTTOMLEFT", reticleFrame, gap + len, 0)
+    -- Ring: 32 segments around the frame CENTER (0, 0 in SetStartPoint offsets)
+    for i = 1, RING_SEGMENTS do
+        local a1 = (i - 1) / RING_SEGMENTS * math.pi * 2
+        local a2 =  i      / RING_SEGMENTS * math.pi * 2
+        ringLines[i]:SetStartPoint("CENTER", reticleFrame,
+            sz * math.cos(a1), sz * math.sin(a1))
+        ringLines[i]:SetEndPoint("CENTER", reticleFrame,
+            sz * math.cos(a2), sz * math.sin(a2))
     end
 
-    -- Center dot
-    if reticle.dot then
-        reticle.dot:ClearAllPoints()
-        reticle.dot:SetPoint("CENTER", reticleFrame, "BOTTOMLEFT", 0, 0)
-    end
+    -- Crosshair arms (gap keeps center clear)
+    lineTop:SetStartPoint("CENTER", reticleFrame, 0,    gap)
+    lineTop:SetEndPoint(  "CENTER", reticleFrame, 0,    gap + len)
+    lineBottom:SetStartPoint("CENTER", reticleFrame, 0, -gap)
+    lineBottom:SetEndPoint(  "CENTER", reticleFrame, 0, -(gap + len))
+    lineLeft:SetStartPoint("CENTER", reticleFrame, -gap,    0)
+    lineLeft:SetEndPoint(  "CENTER", reticleFrame, -(gap + len), 0)
+    lineRight:SetStartPoint("CENTER", reticleFrame, gap,    0)
+    lineRight:SetEndPoint(  "CENTER", reticleFrame, gap + len, 0)
 
+    -- Dot stays at CENTER via SetPoint set once at creation
     reticleFrame:Show()
 end
 
--- Ticker frame for OnUpdate
 local reticleTicker = CreateFrame("Frame")
-reticleTicker:SetScript("OnUpdate", function(_, dt)
-    reticleElapsed = reticleElapsed + dt
-    if reticleElapsed < RETICLE_UPDATE then return end
-    reticleElapsed = 0
+reticleTicker:SetScript("OnUpdate", function()
     if db then UpdateReticle() end
 end)
-
--- Public API for options panel to call when settings change
-local function RebuildReticle()
-    -- Tear down existing lines by hiding frame and rebuilding
-    reticleFrame:Hide()
-    -- Clear all existing lines from the frame (cannot remove, but can reuse)
-    -- Simplest approach: recreate frame children by rebuilding
-    BuildReticle()
-end
 
 ------------------------------------------------------------------------
 -- Event Frame

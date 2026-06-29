@@ -1,4 +1,4 @@
-# AdventurerKit
+# AdventureKit
 
 **v1.0.0 | Author: morphe#11766 | WoW Retail (The War Within)**
 
@@ -65,7 +65,7 @@ Embedded SpeedTracker v1.9.1 — lightweight draggable frame showing movement sp
 
 ## Options Panel
 
-ESC → Interface → AddOns → **AdventurerKit**
+ESC → Interface → AddOns → **AdventureKit**
 SpeedTracker appears as a nested sub-category.
 
 ---
@@ -87,15 +87,15 @@ SpeedTracker appears as a nested sub-category.
 
 ## Installation
 
-1. Extract the `AdventurerKit` folder into:
+1. Extract the `AdventureKit` folder into:
    `World of Warcraft/_retail_/Interface/AddOns/`
-2. Launch WoW and enable **AdventurerKit** in the AddOns list.
+2. Launch WoW and enable **AdventureKit** in the AddOns list.
 3. The SpeedTracker sub-module activates automatically — no separate installation needed.
 
 ---
 
 ## Notes
 
-- Single `SavedVariables` block (`AdventurerKitDB`) covers all features including SpeedTracker
+- Single `SavedVariables` block (`AdventureKitDB`) covers all features including SpeedTracker
 - No external libraries required
 - Compatible with WoW Retail 12.x (The War Within)

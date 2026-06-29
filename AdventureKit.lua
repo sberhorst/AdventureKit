@@ -25,7 +25,7 @@
 -- Addon identity
 ------------------------------------------------------------------------
 local ADDON_NAME    = "AdventureKit"
-local ADDON_VERSION = "2.2.3"
+local ADDON_VERSION = "2.3.0"
 local PREFIX        = "|cff00ccff[AdventureKit]|r"
 
 ------------------------------------------------------------------------
@@ -52,6 +52,15 @@ local DEFAULTS = {
     hudX                = 200,
     hudY                = -210,
     muteInCombat        = true,
+    -- Cursor reticle
+    cursorEnabled       = true,
+    cursorSize          = 32,       -- ring radius in pixels
+    cursorAlpha         = 0.85,
+    cursorR             = 0.91,     -- gold: R
+    cursorG             = 0.78,     -- gold: G
+    cursorB             = 0.29,     -- gold: B
+    cursorHideInCombat  = false,    -- hide reticle during combat
+    cursorInstanceOnly  = false,    -- only show in dungeons/raids/delves
 }
 
 local db  -- assigned on ADDON_LOADED
@@ -694,6 +703,211 @@ local function RefreshBuffHUD()
 end
 
 ------------------------------------------------------------------------
+-- FEATURE 6: Cursor Reticle
+--
+-- A classic FPS-style reticle that follows the mouse cursor:
+--   - Outer ring
+--   - Four crosshair lines with a gap at center (so center stays clear)
+--   - Small center dot
+--
+-- Implemented as a pure-Lua drawn frame using WoW's texture/line APIs.
+-- GetCursorPosition() returns raw screen coords; divide by UIParent scale
+-- to get frame-space coordinates for SetPoint.
+--
+-- The reticle frame sits on TOOLTIP strata so it's always on top.
+-- It hides automatically when the mouse enters interactive UI frames,
+-- during combat (optional), and outside instances (optional).
+------------------------------------------------------------------------
+
+local reticleFrame = CreateFrame("Frame", "AdventureKitReticle", UIParent)
+reticleFrame:SetFrameStrata("TOOLTIP")
+reticleFrame:SetSize(1, 1)          -- zero-size anchor; children do the drawing
+reticleFrame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+reticleFrame:Hide()
+
+------------------------------------------------------------------------
+-- Draw helpers — build reticle shapes as sub-textures
+------------------------------------------------------------------------
+
+local function MakeCircleTexture(parent, radius, r, g, b, a)
+    -- WoW cannot natively draw circles via texture alone.
+    -- We approximate a ring using 32 thin line segments (LinePool / Line API).
+    -- In WoW 12.x, CreateLine() on a frame draws a pixel-width vector line.
+    local segments = 32
+    local lines = {}
+    for i = 1, segments do
+        local line = parent:CreateLine(nil, "OVERLAY")
+        line:SetThickness(1.5)
+        line:SetColorTexture(r, g, b, a)
+        lines[i] = line
+    end
+
+    local function UpdateCircle(cx, cy, rad)
+        for i = 1, segments do
+            local a1 = (i - 1) / segments * math.pi * 2
+            local a2 = i / segments * math.pi * 2
+            lines[i]:SetStartPoint("BOTTOMLEFT", parent,
+                cx + rad * math.cos(a1),
+                cy + rad * math.sin(a1))
+            lines[i]:SetEndPoint("BOTTOMLEFT", parent,
+                cx + rad * math.cos(a2),
+                cy + rad * math.sin(a2))
+        end
+    end
+
+    return UpdateCircle
+end
+
+local function MakeLine(parent, r, g, b, a, thickness)
+    local line = parent:CreateLine(nil, "OVERLAY")
+    line:SetThickness(thickness or 1.5)
+    line:SetColorTexture(r, g, b, a)
+    return line
+end
+
+------------------------------------------------------------------------
+-- Reticle components
+------------------------------------------------------------------------
+
+-- We store update functions and line references in a table
+local reticle = {
+    updateCircle = nil,
+    lines        = {},  -- crosshair lines: top, bottom, left, right
+    dot          = nil, -- center dot texture
+}
+
+local function BuildReticle()
+    if not db then return end
+
+    -- Clear any existing children
+    -- (Called once at init; not rebuilt unless settings change size/color)
+    local r, g, b = db.cursorR, db.cursorG, db.cursorB
+    local a       = db.cursorAlpha or 0.85
+
+    -- Outer ring via line segments
+    reticle.updateCircle = MakeCircleTexture(reticleFrame,
+        db.cursorSize, r, g, b, a)
+
+    -- Crosshair lines (gap = 30% of radius from center)
+    local gap = math.floor(db.cursorSize * 0.35)
+    local len = math.floor(db.cursorSize * 0.45)
+
+    reticle.lineTop    = MakeLine(reticleFrame, r, g, b, a, 1.5)
+    reticle.lineBottom = MakeLine(reticleFrame, r, g, b, a, 1.5)
+    reticle.lineLeft   = MakeLine(reticleFrame, r, g, b, a, 1.5)
+    reticle.lineRight  = MakeLine(reticleFrame, r, g, b, a, 1.5)
+
+    -- Center dot: small square texture
+    if reticle.dot then reticle.dot:Hide() end
+    reticle.dot = reticleFrame:CreateTexture(nil, "OVERLAY")
+    reticle.dot:SetColorTexture(r, g, b, a)
+    reticle.dot:SetSize(3, 3)
+
+    reticle.gap = gap
+    reticle.len = len
+end
+
+------------------------------------------------------------------------
+-- Position update — called every OnUpdate tick
+------------------------------------------------------------------------
+local RETICLE_UPDATE = 0.0   -- every frame (cursor must feel instant)
+local reticleElapsed = 0
+
+local function UpdateReticle()
+    if not db or not db.cursorEnabled then
+        reticleFrame:Hide()
+        return
+    end
+
+    -- Hide during combat if setting enabled
+    if db.cursorHideInCombat and InCombatLockdown() then
+        reticleFrame:Hide()
+        return
+    end
+
+    -- Hide outside instances if setting enabled
+    if db.cursorInstanceOnly then
+        local inInstance, iType = IsInInstance()
+        if not inInstance or not AlertsEnabledForType(iType) then
+            reticleFrame:Hide()
+            return
+        end
+    end
+
+    -- Hide when mouse is over a UI element (prevents reticle on top of frames)
+    local focus = GetMouseFocus and GetMouseFocus()
+    if focus and focus ~= WorldFrame and focus ~= UIParent then
+        reticleFrame:Hide()
+        return
+    end
+
+    -- Get cursor position in screen pixels, convert to UIParent-relative coords
+    local scale  = UIParent:GetEffectiveScale()
+    local cx, cy = GetCursorPosition()
+    if not cx or not cy then reticleFrame:Hide(); return end
+
+    -- Convert to frame-local offset from BOTTOMLEFT of UIParent
+    local fx = cx / scale
+    local fy = cy / scale
+
+    -- Move the anchor frame to cursor position
+    reticleFrame:ClearAllPoints()
+    reticleFrame:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", fx, fy)
+
+    -- Update ring
+    if reticle.updateCircle then
+        reticle.updateCircle(0, 0, db.cursorSize)
+    end
+
+    -- Update crosshair lines relative to center (0,0 in frame space = cursor)
+    local gap = reticle.gap or 8
+    local len = reticle.len or 12
+
+    if reticle.lineTop then
+        reticle.lineTop:SetStartPoint("BOTTOMLEFT", reticleFrame, 0, gap)
+        reticle.lineTop:SetEndPoint("BOTTOMLEFT", reticleFrame, 0, gap + len)
+    end
+    if reticle.lineBottom then
+        reticle.lineBottom:SetStartPoint("BOTTOMLEFT", reticleFrame, 0, -gap)
+        reticle.lineBottom:SetEndPoint("BOTTOMLEFT", reticleFrame, 0, -(gap + len))
+    end
+    if reticle.lineLeft then
+        reticle.lineLeft:SetStartPoint("BOTTOMLEFT", reticleFrame, -gap, 0)
+        reticle.lineLeft:SetEndPoint("BOTTOMLEFT", reticleFrame, -(gap + len), 0)
+    end
+    if reticle.lineRight then
+        reticle.lineRight:SetStartPoint("BOTTOMLEFT", reticleFrame, gap, 0)
+        reticle.lineRight:SetEndPoint("BOTTOMLEFT", reticleFrame, gap + len, 0)
+    end
+
+    -- Center dot
+    if reticle.dot then
+        reticle.dot:ClearAllPoints()
+        reticle.dot:SetPoint("CENTER", reticleFrame, "BOTTOMLEFT", 0, 0)
+    end
+
+    reticleFrame:Show()
+end
+
+-- Ticker frame for OnUpdate
+local reticleTicker = CreateFrame("Frame")
+reticleTicker:SetScript("OnUpdate", function(_, dt)
+    reticleElapsed = reticleElapsed + dt
+    if reticleElapsed < RETICLE_UPDATE then return end
+    reticleElapsed = 0
+    if db then UpdateReticle() end
+end)
+
+-- Public API for options panel to call when settings change
+local function RebuildReticle()
+    -- Tear down existing lines by hiding frame and rebuilding
+    reticleFrame:Hide()
+    -- Clear all existing lines from the frame (cannot remove, but can reuse)
+    -- Simplest approach: recreate frame children by rebuilding
+    BuildReticle()
+end
+
+------------------------------------------------------------------------
 -- Event Frame
 ------------------------------------------------------------------------
 local frame = CreateFrame("Frame", "AdventureKitFrame", UIParent)
@@ -721,6 +935,8 @@ frame:SetScript("OnEvent", function(self, event, arg1, ...)
         hudFrame:SetPoint("TOPLEFT", UIParent, "TOPLEFT", db.hudX, db.hudY)
 
         Print("v" .. ADDON_VERSION .. " loaded. Type |cffffff00/ak|r for options.")
+        -- Build reticle after db is ready
+        SafeCall(BuildReticle)
         C_Timer.After(1, function()
             if db then SafeCall(RefreshBuffHUD) end
         end)
@@ -936,7 +1152,7 @@ optPanel:SetScript("OnShow", function(self)
 
     local sub = self:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
     sub:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -2)
-    sub:SetText("Auto-repair  |  Auto-sell  |  Alerts  |  Durability  |  Buff Alerts  |  Speed  •  v" .. ADDON_VERSION .. "  •  morphe#11766")
+    sub:SetText("Auto-repair  |  Auto-sell  |  Alerts  |  Durability  |  HUD  |  Speed  |  Cursor  •  v" .. ADDON_VERSION .. "  •  morphe#11766")
     sub:SetTextColor(0.55, 0.55, 0.55, 1)
 
     local sf = CreateFrame("ScrollFrame", "AdventureKitScroll", self, "UIPanelScrollFrameTemplate")
@@ -1223,6 +1439,106 @@ optPanel:SetScript("OnShow", function(self)
     speedVer:SetPoint("TOPLEFT", content, "TOPLEFT", 10, cursor)
     speedVer:SetText("Speed v" .. (SpeedTrackerAPI and SpeedTrackerAPI.GetVersion() or "?") .. "  |  /speed for quick commands")
     speedVer:SetTextColor(0.5, 0.5, 0.5, 1)
+    Advance(24)
+
+    -- ── CURSOR RETICLE ───────────────────────────────────────────────
+    RelDivider()
+    RelSectionHeader("Cursor reticle")
+
+    local cursorEnableCB = RelCB("Show reticle on cursor", "cursorEnabled", 10)
+    cursorEnableCB:SetScript("OnClick", function(btn)
+        if db then
+            db.cursorEnabled = btn:GetChecked()
+            if not db.cursorEnabled then reticleFrame:Hide() end
+        end
+    end)
+
+    RelCB("Hide reticle during combat",           "cursorHideInCombat",  10)
+    RelCB("Only show in dungeons / raids / delves","cursorInstanceOnly",  10)
+
+    -- Size slider
+    local cursorSizeLabel = content:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    cursorSizeLabel:SetPoint("TOPLEFT", content, "TOPLEFT", 10, cursor)
+    cursorSizeLabel:SetText("Reticle size:")
+    Advance(16)
+
+    local cursorSizeSlider = CreateFrame("Slider", "AKCursorSizeSlider", content, "OptionsSliderTemplate")
+    cursorSizeSlider:SetPoint("TOPLEFT", content, "TOPLEFT", 10, cursor)
+    cursorSizeSlider:SetWidth(220)
+    cursorSizeSlider:SetMinMaxValues(12, 80)
+    cursorSizeSlider:SetValueStep(2)
+    cursorSizeSlider:SetObeyStepOnDrag(true)
+    cursorSizeSlider:SetValue(db and db.cursorSize or 32)
+    AKCursorSizeSliderLow:SetText("12")
+    AKCursorSizeSliderHigh:SetText("80")
+    AKCursorSizeSliderText:SetText(tostring(db and db.cursorSize or 32))
+    cursorSizeSlider:SetScript("OnValueChanged", function(s, val)
+        val = math.floor(val)
+        AKCursorSizeSliderText:SetText(tostring(val))
+        if db then
+            db.cursorSize = val
+            db.cursorR = db.cursorR  -- preserve color
+            SafeCall(RebuildReticle)
+        end
+    end)
+    Advance(40)
+
+    -- Opacity slider
+    local cursorAlphaLabel = content:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    cursorAlphaLabel:SetPoint("TOPLEFT", content, "TOPLEFT", 10, cursor)
+    cursorAlphaLabel:SetText("Opacity:")
+    Advance(16)
+
+    local cursorAlphaSlider = CreateFrame("Slider", "AKCursorAlphaSlider", content, "OptionsSliderTemplate")
+    cursorAlphaSlider:SetPoint("TOPLEFT", content, "TOPLEFT", 10, cursor)
+    cursorAlphaSlider:SetWidth(220)
+    cursorAlphaSlider:SetMinMaxValues(0.1, 1.0)
+    cursorAlphaSlider:SetValueStep(0.05)
+    cursorAlphaSlider:SetObeyStepOnDrag(true)
+    cursorAlphaSlider:SetValue(db and db.cursorAlpha or 0.85)
+    AKCursorAlphaSliderLow:SetText("10%")
+    AKCursorAlphaSliderHigh:SetText("100%")
+    AKCursorAlphaSliderText:SetText(string.format("%.0f%%", (db and db.cursorAlpha or 0.85) * 100))
+    cursorAlphaSlider:SetScript("OnValueChanged", function(s, val)
+        AKCursorAlphaSliderText:SetText(string.format("%.0f%%", val * 100))
+        if db then
+            db.cursorAlpha = val
+            SafeCall(RebuildReticle)
+        end
+    end)
+    Advance(40)
+
+    -- Color presets
+    local colorLabel = content:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    colorLabel:SetPoint("TOPLEFT", content, "TOPLEFT", 10, cursor)
+    colorLabel:SetText("Color:")
+    Advance(20)
+
+    local colors = {
+        { name="Gold",  r=0.91, g=0.78, b=0.29 },
+        { name="White", r=1.0,  g=1.0,  b=1.0  },
+        { name="Red",   r=1.0,  g=0.2,  b=0.2  },
+        { name="Cyan",  r=0.2,  g=0.9,  b=1.0  },
+        { name="Green", r=0.2,  g=1.0,  b=0.4  },
+    }
+    local colorBtns = {}
+    local btnX = 10
+    for _, col in ipairs(colors) do
+        local btn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
+        btn:SetSize(52, 22)
+        btn:SetPoint("TOPLEFT", content, "TOPLEFT", btnX, cursor)
+        btn:SetText(col.name)
+        local r, g, b = col.r, col.g, col.b
+        btn:SetScript("OnClick", function()
+            if db then
+                db.cursorR, db.cursorG, db.cursorB = r, g, b
+                SafeCall(RebuildReticle)
+            end
+        end)
+        table.insert(colorBtns, btn)
+        btnX = btnX + 56
+    end
+    Advance(32)
 
     -- Update content frame height to match actual content
     content:SetHeight(math.abs(cursor) + 20)

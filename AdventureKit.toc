@@ -2,7 +2,7 @@
 ## Title: AdventureKit
 ## Notes: Auto-repair, auto-sell greys, dungeon/raid readiness alerts, gear durability warnings, and movement speed display. No libs, no bloat.
 ## Author: morphe#11766
-## Version: 2.3.0
+## Version: 2.3.1
 ## SavedVariables: AdventureKitDB
 
 AdventureKit.lua

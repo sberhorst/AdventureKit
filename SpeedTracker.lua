@@ -1,5 +1,5 @@
 --[[
-    SpeedTracker v3.0.0  (embedded in AdventurerKit)
+    SpeedTracker v3.0.0  (embedded in AdventureKit)
     Author: morphe#11766
 
     WoW 12.x target. No legacy API.
@@ -222,11 +222,11 @@ end
 local stInitFrame = CreateFrame("Frame")
 stInitFrame:RegisterEvent("ADDON_LOADED")
 stInitFrame:SetScript("OnEvent", function(self, event, arg1)
-    if arg1 ~= "AdventurerKit" then return end
+    if arg1 ~= "AdventureKit" then return end
 
-    AdventurerKitDB = AdventurerKitDB or {}
-    AdventurerKitDB.SpeedTracker = AdventurerKitDB.SpeedTracker or {}
-    stDB = AdventurerKitDB.SpeedTracker
+    AdventureKitDB = AdventureKitDB or {}
+    AdventureKitDB.SpeedTracker = AdventureKitDB.SpeedTracker or {}
+    stDB = AdventureKitDB.SpeedTracker
     ST_ApplyDefaults()
 
     tracker:SetScale(stDB.scale or 1.0)

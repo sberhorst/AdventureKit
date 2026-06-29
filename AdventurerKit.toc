@@ -1,0 +1,9 @@
+## Interface: 120007
+## Title: AdventurerKit
+## Notes: Auto-repair, auto-sell greys, dungeon/raid readiness alerts, gear durability warnings, and movement speed display. No libs, no bloat.
+## Author: morphe#11766
+## Version: 2.2.0
+## SavedVariables: AdventurerKitDB
+
+AdventurerKit.lua
+SpeedTracker.lua

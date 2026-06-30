@@ -25,7 +25,7 @@
 -- Addon identity
 ------------------------------------------------------------------------
 local ADDON_NAME    = "AdventureKit"
-local ADDON_VERSION = "2.3.1"
+local ADDON_VERSION = "2.3.2"
 local PREFIX        = "|cff00ccff[AdventureKit]|r"
 
 ------------------------------------------------------------------------
@@ -325,23 +325,42 @@ end
 local function PetStatus()
     -- UnitExists("pet") returns true briefly before the pet fully loads
     -- after a zone transition, causing false "no pet" alerts.
-    -- UnitHealth("pet") > 0 is the authoritative signal from the server
-    -- that the pet is alive and active. Zero health = dead or not loaded.
     local exists = false
     SafeCall(function() exists = UnitExists("pet") == true end)
     if not exists then return "none" end
 
-    -- Pet exists: check health to confirm it's alive and fully loaded
-    local health = 0
-    SafeCall(function() health = UnitHealth("pet") or 0 end)
-    if health <= 0 then
-        -- Could be dead OR still loading — treat as not-yet-ready; don't alert
+    -- WoW 12.x: in certain phased/protected combat states (Delves, some
+    -- scenario instances), UnitHealth() returns a "secret number" — a
+    -- tainted value that cannot be compared with <, >, <=, >= outside a
+    -- pcall, or the comparison itself throws a taint error. We must do
+    -- BOTH the retrieval AND the comparison inside the same pcall.
+    local isAlive = nil  -- nil = could not determine (treat as not-yet-ready)
+    local ok = pcall(function()
+        local health = UnitHealth("pet")
+        if health and health > 0 then
+            isAlive = true
+        else
+            isAlive = false
+        end
+    end)
+
+    if not ok or isAlive == nil then
+        -- Taint fired or health unreadable: fall back to UnitIsDead,
+        -- which is a boolean and not subject to the same secret-number issue.
         local dead = false
         SafeCall(function() dead = UnitIsDead("pet") == true end)
-        return dead and "dead" or "none"
+        return dead and "dead" or "alive"
+        -- Default to "alive" rather than "none" when we genuinely cannot
+        -- determine health — avoids false "no pet" alerts when the only
+        -- problem is a taint restriction, not an actual missing pet.
     end
 
-    return "alive"
+    if isAlive then return "alive" end
+
+    -- Health confirmed at or below 0: could be dead or still loading.
+    local dead = false
+    SafeCall(function() dead = UnitIsDead("pet") == true end)
+    return dead and "dead" or "none"
 end
 
 local function CheckRaidBuffs()

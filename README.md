@@ -1,6 +1,6 @@
 # AdventureKit
 
-**v1.0.0 | Author: morphe#11766 | WoW Retail (The War Within)**
+**v2.4.0 | Author: morphe#11766 | WoW Retail 12.1.0 (Midnight)**
 
 A zero-dependency quality-of-life addon for active dungeon and raid players.
 
@@ -98,4 +98,8 @@ SpeedTracker appears as a nested sub-category.
 
 - Single `SavedVariables` block (`AdventureKitDB`) covers all features including SpeedTracker
 - No external libraries required
-- Compatible with WoW Retail 12.x (The War Within)
+- Compatible with WoW Retail 12.1.0 (Midnight) — TOC Interface `120100`
+- Updated for 12.1 Secret Auras: flask/food/raid-buff detection uses the
+  spell-ID and spell-name aura APIs, and holds its last known-good reading
+  while auras are secret (combat, encounters, M+, PvP) rather than
+  reporting buffs as missing

@@ -10,6 +10,20 @@
       5. Persistent HUD showing Flask / Food status — glows red when missing
       6. Embedded SpeedTracker movement speed display (loaded via SpeedTracker.lua)
 
+    v2.4.0 — WoW 12.1.0 (Midnight) compatibility:
+      - TOC Interface bumped 120007 -> 120100
+      - Secret Auras: index-based aura reads (C_UnitAuras.GetBuffDataByIndex)
+        now Lua error during combat, encounters, M+ and PvP. The old code
+        could not tell a blocked call from an empty aura list, so flask/food
+        would have read as MISSING for the whole of every pull.
+        ScanBuffs now reports restriction separately, HasFlask/HasFood hold
+        the last known-good reading through secret periods, and a spell-ID
+        fast path (GetPlayerAuraBySpellID) keeps working mid-combat.
+      - CheckRaidBuffs: replaced the per-member index scan with
+        C_UnitAuras.GetAuraDataBySpellName, which stays callable while auras
+        are secret. Buff names resolved via C_Spell.GetSpellName so the
+        lookup works on non-English clients.
+
     v1.6.0 — Hardening pass:
       - All db accesses guarded against nil (pre-ADDON_LOADED race)
       - muteInCombat now actually suppresses alerts
@@ -25,7 +39,7 @@
 -- Addon identity
 ------------------------------------------------------------------------
 local ADDON_NAME    = "AdventureKit"
-local ADDON_VERSION = "2.3.2"
+local ADDON_VERSION = "2.4.0"
 local PREFIX        = "|cff00ccff[AdventureKit]|r"
 
 ------------------------------------------------------------------------
@@ -221,6 +235,13 @@ end
 ------------------------------------------------------------------------
 -- FEATURE 3: Instance Entry Alerts
 ------------------------------------------------------------------------
+-- Optional fast path only. These are The War Within flask IDs and have NOT
+-- been re-verified against Midnight (12.x) flasks — Thallasian/Haranir tiers,
+-- Flask of Tempered *, Flask of Alchemical Chaos, Flask of Saving Graces.
+-- Detection does not depend on this table: HasFlask falls back to matching
+-- "Flask" in the aura name, which covers every tier without maintenance.
+-- The only thing a stale ID costs is the in-combat shortcut. Verify in-game
+-- and update if you want flask state to stay live mid-pull.
 local FLASK_BUFF_IDS = {
     432021, 432022, 432023, 432024, 432025,
 }
@@ -254,33 +275,107 @@ local PET_CLASSES = {
 ------------------------------------------------------------------------
 -- Buff scanning helper
 --
--- WoW 12.x (The War Within): C_UnitAuras.GetBuffDataByIndex is the
--- correct API for reading player buffs. Returns a table with .name
--- and .spellId fields, or nil when the slot is empty / out of range.
+-- WoW 12.1.0 (Midnight) — Secret Auras.
+--
+-- Blizzard now marks aura data as "secret" during combat, boss encounters,
+-- Mythic+ and PvP. While auras are secret, every C_UnitAuras API that
+-- reaches aura data *by index, slot, or instance ID* raises a Lua error
+-- when called from an addon. C_UnitAuras.GetBuffDataByIndex is one of them.
+--
+-- Only the spell-ID / spell-name entry points stay callable:
+--   C_UnitAuras.GetPlayerAuraBySpellID(spellID)
+--   C_UnitAuras.GetAuraDataBySpellName(unit, name [, filter])
+--
+-- This matters more than it looks. The old code pcall-wrapped the index
+-- scan and treated a *failed* call exactly like an *empty* slot — both
+-- came back nil, the loop broke, and HasFlask/HasFood returned false.
+-- Under 12.1 that means the moment you pull a boss the HUD would light up
+-- "No Flask / No Food" for the whole fight, in precisely the content this
+-- addon exists for.
+--
+-- The fix has three parts:
+--   1. Distinguish "restricted" from "no such aura" (ScanBuffs returns ok).
+--   2. Prefer the spell-name/ID APIs, which work even while auras are secret.
+--   3. When we genuinely cannot read auras, reuse the last known-good answer
+--      instead of asserting the buff is missing. Readiness is a pre-pull
+--      question and a flask lasts an hour — the reading taken before the
+--      pull is still the truthful one.
 ------------------------------------------------------------------------
 
--- Returns (name, spellID) for buff slot i, or (nil, nil) if empty.
-local function GetBuffInfo(unit, i)
-    local ok, data = pcall(C_UnitAuras.GetBuffDataByIndex, unit, i)
-    if ok and data then
-        return data.name, data.spellId
+-- Scan a unit's helpful auras by index.
+-- Returns (true, list) on success, or (false, nil) when auras are secret.
+-- list entries are { name = <string>, spellID = <number> }.
+local function ScanBuffs(unit)
+    local list = {}
+    for i = 1, 40 do
+        local ok, data = pcall(C_UnitAuras.GetBuffDataByIndex, unit, i)
+        if not ok then
+            -- Index-based access is restricted right now. We know nothing.
+            return false, nil
+        end
+        if not data then break end   -- genuine end of the aura list
+        list[#list + 1] = { name = data.name, spellID = data.spellId }
     end
-    return nil, nil
+    return true, list
 end
 
+-- Spell-ID lookup that stays legal while auras are secret.
+local function PlayerHasAuraID(spellID)
+    local ok, data = pcall(C_UnitAuras.GetPlayerAuraBySpellID, spellID)
+    return ok and data ~= nil
+end
+
+-- Localised spell name for an ID, cached. Used with GetAuraDataBySpellName,
+-- which needs the name as the client displays it — hardcoded English would
+-- silently never match on a non-English client.
+local _spellNameCache = {}
+local function SpellName(spellID)
+    local cached = _spellNameCache[spellID]
+    if cached ~= nil then return cached or nil end
+    local name
+    SafeCall(function()
+        if C_Spell and C_Spell.GetSpellName then
+            name = C_Spell.GetSpellName(spellID)
+        end
+    end)
+    _spellNameCache[spellID] = name or false
+    return name
+end
+
+-- Spell-name lookup on an arbitrary unit; legal while auras are secret.
+local function UnitHasAuraNamed(unit, name)
+    if not name then return false end
+    local ok, data = pcall(C_UnitAuras.GetAuraDataBySpellName, unit, name, "HELPFUL")
+    return ok and data ~= nil
+end
+
+-- Last known-good readiness, held across secret-aura periods.
+local _lastFlask, _lastFood = false, false
+
 local function HasFlask()
-    for i = 1, 40 do
-        local name, spellID = GetBuffInfo("player", i)
-        if not name then break end
-        -- Name-based check (catches any flask regardless of tier)
-        if name:find("Flask") then return true end
-        -- Spell ID check for known TWW flasks
-        if spellID then
-            for _, id in ipairs(FLASK_BUFF_IDS) do
-                if spellID == id then return true end
-            end
+    -- Fast path: known IDs, readable even mid-combat.
+    for _, id in ipairs(FLASK_BUFF_IDS) do
+        if PlayerHasAuraID(id) then
+            _lastFlask = true
+            return true
         end
     end
+
+    local ok, buffs = ScanBuffs("player")
+    if not ok then
+        -- Auras are secret. Do not claim the flask is missing.
+        return _lastFlask
+    end
+
+    for _, b in ipairs(buffs) do
+        -- Name match catches any flask tier without an ID table to maintain.
+        if b.name and b.name:find("Flask") then
+            _lastFlask = true
+            return true
+        end
+    end
+
+    _lastFlask = false
     return false
 end
 
@@ -292,16 +387,28 @@ local FOOD_BUFF_NAMES = {
 }
 
 local function HasFood()
-    for i = 1, 40 do
-        local name = GetBuffInfo("player", i)
-        if not name then break end
-        if FOOD_BUFF_NAMES[name] then return true end
-        if name:find("Well Fed") or name:find("Fed") or
-           name:find("Feast")    or name:find("Meal") or
-           name:find("Dish") then
-            return true
+    local ok, buffs = ScanBuffs("player")
+    if not ok then
+        return _lastFood
+    end
+
+    for _, b in ipairs(buffs) do
+        local name = b.name
+        if name then
+            if FOOD_BUFF_NAMES[name] then
+                _lastFood = true
+                return true
+            end
+            if name:find("Well Fed") or name:find("Fed") or
+               name:find("Feast")    or name:find("Meal") or
+               name:find("Dish") then
+                _lastFood = true
+                return true
+            end
         end
     end
+
+    _lastFood = false
     return false
 end
 
@@ -391,15 +498,21 @@ local function CheckRaidBuffs()
             table.insert(unitsToCheck, groupPrefix .. m)
         end
 
-        for _, unit in ipairs(unitsToCheck) do
-            if UnitExists(unit) then
-                for i = 1, 40 do
-                    local name, id = GetBuffInfo(unit, i)
-                    if not name then break end
-                    if id == spellID then found = true; break end
+        -- 12.1: scanning group members by aura index errors while auras are
+        -- secret. Look the buff up by spell name instead — that path stays
+        -- open, and raid buffs are ordinary non-secret spells.
+        local buffName = SpellName(spellID)
+        if not buffName then
+            -- Spell data not cached yet; skip this buff rather than
+            -- reporting a missing buff we were never able to look for.
+            found = true
+        else
+            for _, unit in ipairs(unitsToCheck) do
+                if UnitExists(unit) and UnitHasAuraNamed(unit, buffName) then
+                    found = true
+                    break
                 end
             end
-            if found then break end
         end
 
         if not found then

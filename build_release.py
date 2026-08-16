@@ -13,6 +13,14 @@ to find out. Anything not shipped to players (tests, build tooling, git) is
 excluded and the script fails if any of it leaks in.
 
     python build_release.py
+    python build_release.py --version 9.2.0-fork.1 --unmanaged
+
+--version overrides the .toc value, for an addon whose ## Version is a
+packager token. --unmanaged strips the addon-manager catalogue IDs
+(X-Curse-Project-ID, X-Wago-ID, X-WoWI-ID) from the shipped .toc -- use it
+for a private fork, so no addon manager claims the folder and replaces your
+build with the upstream one. Both rewrite the archived .toc only; the file
+on disk is untouched, so the repo stays mergeable against upstream.
 
 Writes dist/<Addon>-<version>.zip and verifies the result.
 """
@@ -21,6 +29,7 @@ import os
 import re
 import sys
 import zipfile
+from datetime import datetime, timezone
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DIST = os.path.join(ROOT, "dist")
@@ -30,6 +39,36 @@ EXTRA_FILES = ["README.md", "LICENSE", "LICENSE.txt", "CHANGELOG.md"]
 
 # Never shipped, whatever the .toc says.
 BLOCKED = re.compile(r"(^|/)(tests?|dist|\.git|__pycache__)(/|$)|\.pyc?$")
+
+
+# TOC directives addon managers use to match an installed folder to a
+# catalogue entry.
+MANAGER_ID_DIRECTIVES = ("X-Curse-Project-ID", "X-Wago-ID", "X-WoWI-ID")
+
+
+def strip_manager_ids(body):
+    """Remove addon-manager catalogue IDs from a .toc body.
+
+    For a private fork this matters. Those IDs are inherited from the
+    upstream project, so the installed folder advertises itself as upstream's
+    addon: a manager can decide the fork is out of date and replace it with
+    the official build, silently undoing local fixes. Removing them makes the
+    folder unmanaged -- no manager claims it, nothing overwrites it.
+
+    Applied to the archived copy only, so the working tree stays mergeable
+    against upstream.
+    """
+    out, removed = [], []
+    for line in body.splitlines(keepends=True):
+        stripped = line.strip()
+        directive = None
+        if stripped.startswith("##"):
+            directive = stripped[2:].partition(":")[0].strip()
+        if directive in MANAGER_ID_DIRECTIVES:
+            removed.append(f"{directive}:{stripped.partition(':')[2].strip()}")
+            continue
+        out.append(line)
+    return "".join(out), removed
 
 
 def find_toc():
@@ -87,6 +126,7 @@ def main():
             override = sys.argv[i + 2]
         elif a.startswith("--version="):
             override = a.split("=", 1)[1]
+    unmanaged = "--unmanaged" in sys.argv
 
     version = directives.get("Version", "")
     if not version:
@@ -135,16 +175,32 @@ def main():
     if os.path.exists(out):
         os.remove(out)
 
+    removed_ids = []
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         for f in files:
             arc = f"{addon}/" + f.replace(os.sep, "/")
-            if f == toc_name and token:
+            if f == toc_name and (token or unmanaged):
                 # The working-tree .toc must keep @project-version@ for the
                 # packager, but shipping that literal would show the raw token
                 # in the player's AddOns list. Substitute it in the archived
-                # copy only, leaving the file on disk untouched.
+                # copy only, leaving the file on disk untouched -- which also
+                # keeps this repo mergeable against upstream.
                 body = open(os.path.join(ROOT, f), encoding="utf-8").read()
-                body = body.replace(version_token_text, version)
+                if token:
+                    body = body.replace(version_token_text, version)
+                    # The packager fills these too. Leaving them raw ships a
+                    # literal @project-date-iso@ into the addon's metadata.
+                    today = datetime.now(timezone.utc)
+                    body = body.replace("@project-date-iso@", today.isoformat())
+                    body = body.replace("@project-date-integer@",
+                                        today.strftime("%Y%m%d%H%M%S"))
+                    leftover = re.findall(r"@[\w-]+@", body)
+                    if leftover:
+                        print(f"  WARNING: unsubstituted packager tokens in the "
+                              f"shipped .toc: {sorted(set(leftover))}")
+                if unmanaged:
+                    body, stripped_ids = strip_manager_ids(body)
+                    removed_ids.extend(stripped_ids)
                 z.writestr(arc, body)
             else:
                 z.write(os.path.join(ROOT, f), arc)
@@ -166,6 +222,12 @@ def main():
         sys.exit(f"Non-shipping files leaked into the archive: {leaked}")
 
     print(f"Built {out}  ({os.path.getsize(out):,} bytes)")
+    if removed_ids:
+        print("Unmanaged build -- stripped addon-manager IDs from the shipped .toc:")
+        for r in removed_ids:
+            print(f"  {r}")
+        print("  (no addon manager will claim this folder, so nothing "
+              "overwrites it)")
     print(f"{addon} {version} -- Interface {directives.get('Interface', '?')} "
           f"-- {len(names)} files:")
     for n in sorted(names):

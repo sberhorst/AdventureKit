@@ -61,6 +61,12 @@ def referenced_by_xml(xml_rel):
         return out
     with open(path, encoding="utf-8", errors="replace") as fh:
         body = fh.read()
+    # Strip XML comments first. Ace3 ships disabled includes commented out
+    # (AceConfigDropdown), and matching inside a comment makes the build
+    # demand a file that is deliberately absent. Packager markers such as
+    # <!--@no-lib-strip@--> are standalone comments, so removing comments
+    # drops the markers and leaves the real includes between them intact.
+    body = re.sub(r"<!--.*?-->", "", body, flags=re.S)
     base = os.path.dirname(xml_rel.replace("\\", os.sep))
     for ref in re.findall(r'file=["\']([^"\']+)["\']', body):
         rel = os.path.normpath(os.path.join(base, ref.replace("\\", os.sep)))
@@ -75,15 +81,29 @@ def main():
     addon = toc_name[:-4]
     directives, listed = parse_toc(os.path.join(ROOT, toc_name))
 
+    override = None
+    for i, a in enumerate(sys.argv[1:]):
+        if a == "--version" and i + 2 <= len(sys.argv[1:]):
+            override = sys.argv[i + 2]
+        elif a.startswith("--version="):
+            override = a.split("=", 1)[1]
+
     version = directives.get("Version", "")
     if not version:
         sys.exit("No '## Version:' directive in the .toc")
-    if re.fullmatch(r"@[\w-]+@", version):
+
+    token = re.fullmatch(r"@[\w-]+@", version)
+    if token and not override:
         sys.exit(
-            f"Version is the packager token {version}. This addon is built by "
-            f"the CurseForge packager, which substitutes it at release time -- "
-            f"a hand-built zip would ship the literal token. Use the packager."
+            f"Version is the packager token {version}. This addon is normally "
+            f"built by the CurseForge packager, which substitutes it at release "
+            f"time -- a hand-built zip would ship the literal token.\n\n"
+            f"Use the packager, or pass an explicit version to build anyway:\n"
+            f"    python build_release.py --version 9.2.0-fork.1"
         )
+    version_token_text = version if token else None
+    if override:
+        version = override
 
     wanted = [toc_name]
     for entry in listed:
@@ -118,7 +138,16 @@ def main():
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         for f in files:
             arc = f"{addon}/" + f.replace(os.sep, "/")
-            z.write(os.path.join(ROOT, f), arc)
+            if f == toc_name and token:
+                # The working-tree .toc must keep @project-version@ for the
+                # packager, but shipping that literal would show the raw token
+                # in the player's AddOns list. Substitute it in the archived
+                # copy only, leaving the file on disk untouched.
+                body = open(os.path.join(ROOT, f), encoding="utf-8").read()
+                body = body.replace(version_token_text, version)
+                z.writestr(arc, body)
+            else:
+                z.write(os.path.join(ROOT, f), arc)
 
     # Verify what was written rather than trusting the loop above.
     with zipfile.ZipFile(out) as z:

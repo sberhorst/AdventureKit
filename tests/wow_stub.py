@@ -133,7 +133,15 @@ stubframe = function()
 end
 _G.stubframe = stubframe
 
-CreateFrame  = function() return stubframe() end
+-- Every frame the addon creates is recorded, so a test can dispatch an
+-- event to all of them the way the client does, instead of reaching for one
+-- particular frame the addon happens to keep in a local.
+TEST.frames = {}
+CreateFrame  = function()
+                 local f = stubframe()
+                 table.insert(TEST.frames, f)
+                 return f
+               end
 UIParent     = stubframe()
 GameTooltip  = stubframe()
 strtrim      = function(s, chars) return (tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "")) end
@@ -294,6 +302,25 @@ def load_addon(files, exports=(), extra_lua="", addon_name=None):
         run_chunk(source + "\n" + tail + "\n", "@" + name, addon_name, shared)
 
     return lua
+
+
+def fire_event(lua, event, *args):
+    """Dispatch an event to every frame with an OnEvent script.
+
+    This is what the client does: it does not know or care which frame an
+    addon kept in which local. Driving events this way means a test does not
+    have to export a frame just to reach its handler, and it exercises the
+    real registration path.
+
+    Errors from handlers propagate, so a test can assert an event completes
+    cleanly -- which is the whole point when the failure being guarded
+    against is "the addon raised during ADDON_LOADED".
+    """
+    frames = lua.globals().TEST.frames
+    for frame in list(frames.values()):
+        handler = frame.GetScript(frame, "OnEvent")
+        if handler is not None:
+            handler(frame, event, *args)
 
 
 def set_auras(lua, pairs_):

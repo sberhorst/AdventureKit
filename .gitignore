@@ -1,0 +1,6 @@
+# Build output — release zips are uploaded to CurseForge, not committed
+dist/
+
+# Python bytecode from the test harness
+__pycache__/
+*.pyc

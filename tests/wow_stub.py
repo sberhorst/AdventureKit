@@ -48,17 +48,98 @@ ADDON_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #   TEST.prints      - everything the addon printed to chat
 # ---------------------------------------------------------------------------
 PRELUDE = r"""
-_G.TEST = { auras = {}, restricted = false, prints = {}, spellNames = {} }
+_G.TEST = {
+  auras = {}, restricted = false, prints = {}, spellNames = {},
+  speed = 7.0,        -- GetUnitSpeed return; 7.0 is base run speed
+  speedTaint = false, -- true => GetUnitSpeed yields a value that errors on arithmetic
+}
 
--- A frame whose every method returns the frame, so chained UI setup in the
--- addon runs without us having to enumerate the widget API.
-local function stubframe()
-  local f = {}
-  return setmetatable(f, {__index = function() return function() return f end end})
+-- A "secret number": readable, but any arithmetic on it raises. This is how
+-- protected combat state behaves for addons -- the value comes back, and the
+-- error only fires when you try to use it. Addons must do the retrieval AND
+-- the arithmetic inside the same pcall.
+_G.SECRET_NUMBER = setmetatable({}, {
+  __div = function() error("attempt to perform arithmetic on a secret value") end,
+  __mul = function() error("attempt to perform arithmetic on a secret value") end,
+  __add = function() error("attempt to perform arithmetic on a secret value") end,
+  __sub = function() error("attempt to perform arithmetic on a secret value") end,
+  __lt  = function() error("attempt to compare a secret value") end,
+  __le  = function() error("attempt to compare a secret value") end,
+})
+
+-- A stand-in frame.
+--
+-- Methods that carry state a test might reasonably assert on -- shown,
+-- scale, text, checked, anchor point, scripts -- are real. Everything else
+-- falls through to a no-op that returns the frame, so the addon's chained
+-- UI setup runs without us having to enumerate the whole widget API.
+--
+-- The real state matters: with a blanket "return the frame" stub, IsShown()
+-- returns a table, which is truthy, so `not frame:IsShown()` is always false
+-- and any toggle test silently passes regardless of the addon's behaviour.
+local stubframe
+stubframe = function()
+  local f = {
+    _shown = true, _scale = 1, _text = "", _checked = false,
+    _point = {"TOPLEFT", nil, "TOPLEFT", 0, 0}, _scripts = {},
+  }
+  function f:SetShown(v) self._shown = (v and true or false) return self end
+  function f:Show()      self._shown = true  return self end
+  function f:Hide()      self._shown = false return self end
+  function f:IsShown()   return self._shown end
+  function f:IsVisible() return self._shown end
+  function f:SetScale(v) self._scale = v return self end
+  function f:GetScale()  return self._scale end
+  function f:SetText(t)  self._text = t return self end
+  function f:GetText()   return self._text end
+  function f:SetChecked(v) self._checked = (v and true or false) return self end
+  function f:GetChecked()  return self._checked end
+  function f:SetPoint(p, rel, rp, x, y)
+    self._point = {p, rel, rp, x or 0, y or 0} return self
+  end
+  function f:GetPoint() local p = self._point return p[1], p[2], p[3], p[4], p[5] end
+  function f:SetScript(k, fn) self._scripts[k] = fn return self end
+  function f:GetScript(k)     return self._scripts[k] end
+  function f:HasScript()      return true end
+  -- Geometry returns real numbers. Addons do layout arithmetic on these
+  -- (`16 / slider:GetWidth()`), and a frame-returning stub turns that into
+  -- "attempt to perform arithmetic on a table value" at load time.
+  function f:SetWidth(v)  self._w = v return self end
+  function f:GetWidth()   return self._w or 100 end
+  function f:SetHeight(v) self._h = v return self end
+  function f:GetHeight()  return self._h or 20 end
+  function f:SetSize(w, h) self._w, self._h = w, h return self end
+  function f:GetSize()    return self:GetWidth(), self:GetHeight() end
+  function f:GetLeft()    return 0 end
+  function f:GetRight()   return self:GetWidth() end
+  function f:GetTop()     return self:GetHeight() end
+  function f:GetBottom()  return 0 end
+  function f:GetCenter()  return self:GetWidth() / 2, self:GetHeight() / 2 end
+  function f:GetEffectiveScale() return self._scale or 1 end
+  function f:GetFrameLevel()     return 1 end
+  function f:GetStringWidth()    return 50 end
+  function f:GetStringHeight()   return 12 end
+  function f:GetNumPoints()      return 1 end
+  function f:GetValue()          return self._value or 0 end
+  function f:SetValue(v)         self._value = v return self end
+  function f:GetMinMaxValues()   return 0, 100 end
+  function f:GetThumbTexture()   return stubframe() end
+  function f:GetFont()           return "Fonts\\FRIZQT__.TTF", 12, "" end
+  function f:GetObjectType()     return "Frame" end
+  function f:CreateFontString() return stubframe() end
+  function f:CreateTexture()    return stubframe() end
+  function f:CreateLine()       return stubframe() end
+  return setmetatable(f, {__index = function() return function(s) return s end end})
 end
+_G.stubframe = stubframe
 
 CreateFrame  = function() return stubframe() end
 UIParent     = stubframe()
+GameTooltip  = stubframe()
+strtrim      = function(s, chars) return (tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "")) end
+strsplit     = function(sep, s) return s end
+wipe         = function(t) for k in pairs(t) do t[k] = nil end return t end
+unpack       = unpack or table.unpack
 GetTime      = function() return 0 end
 print        = function(...)
                  local s = ""
@@ -78,7 +159,10 @@ UnitIsDead           = function() return false end
 UnitAffectingCombat  = function() return false end
 GetCoinTextureString = function(v) return tostring(v) end
 GetCursorPosition    = function() return 0, 0 end
-GetUnitSpeed         = function() return 0 end
+GetUnitSpeed         = function()
+                         if TEST.speedTaint then return SECRET_NUMBER end
+                         return TEST.speed
+                       end
 GetMouseFocus        = nil
 GetMouseFoci         = function() return {} end
 hooksecurefunc       = function() end
@@ -156,26 +240,59 @@ C_UnitAuras = {
 """
 
 
-def load_addon(files, exports=(), extra_lua=""):
+def load_addon(files, exports=(), extra_lua="", addon_name=None):
     """Load addon .lua files under the stub.
 
-    files   -- filenames relative to the addon root, in TOC order.
-    exports -- names of addon *locals* to re-expose on _G as T_<name>,
-               since Lua locals are otherwise unreachable from the harness.
+    files   -- filenames relative to the addon root, in TOC order. Paths may
+               use the .toc's backslashes. Non-.lua entries (embeds.xml) are
+               skipped: XML-included libraries are stubbed, not executed.
+    exports -- names of addon *locals* to re-expose on _G as T_<name>, since
+               Lua locals are otherwise unreachable from the harness.
+
+    Each file is loaded as its own chunk and called with (addonName, addon),
+    which is what WoW does. That matters twice over: files get their own
+    local scope rather than silently sharing one, and the common
+    `local addonName, addon = ...` namespace idiom actually receives its
+    arguments instead of nil.
     """
     lua = LuaRuntime(unpack_returned_tuples=True)
     lua.execute(PRELUDE)
     if extra_lua:
         lua.execute(extra_lua)
 
-    source = []
-    for name in files:
-        path = os.path.join(ADDON_ROOT, name)
-        with open(path, encoding="utf-8") as fh:
-            source.append(fh.read())
+    if addon_name is None:
+        addon_name = os.path.basename(ADDON_ROOT).replace("-repo", "")
 
-    tail = "\n".join(f"_G.T_{n} = {n}" for n in exports)
-    lua.execute("\n".join(source) + "\n" + tail + "\n")
+    # Shared private namespace, the second vararg WoW hands every addon file.
+    # Also published as _G.ADDON_NS so tests can call methods the addon hangs
+    # off it (`function addon:parseRealID(...)`), which are otherwise
+    # unreachable -- they live on a table no global points at.
+    shared = lua.eval("{}")
+    lua.globals().ADDON_NS = shared
+
+    run_chunk = lua.eval(
+        "function(src, chunkname, addonName, addonTable)"
+        "  local fn, err = load(src, chunkname)"
+        "  if not fn then error(chunkname .. ': ' .. tostring(err), 0) end"
+        "  return fn(addonName, addonTable)"
+        "end"
+    )
+
+    # Only assign an export from the chunk that actually defines it, so a
+    # later file cannot blank out an earlier file's symbol with nil.
+    tail = "\n".join(
+        f"if {n} ~= nil then _G.T_{n} = {n} end" for n in exports
+    )
+
+    for name in files:
+        if not name.lower().endswith(".lua"):
+            continue
+        rel = name.replace("\\", os.sep).replace("/", os.sep)
+        path = os.path.join(ADDON_ROOT, rel)
+        with open(path, encoding="utf-8") as fh:
+            source = fh.read()
+        run_chunk(source + "\n" + tail + "\n", "@" + name, addon_name, shared)
+
     return lua
 
 

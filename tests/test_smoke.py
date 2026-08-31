@@ -51,7 +51,11 @@ def main():
 
     c.ok("declares at least one Lua file", files)
     for f in files:
-        c.ok(f"{f} exists on disk", os.path.exists(os.path.join(ADDON_ROOT, f)))
+        # TOC entries use backslashes for subdirectories, which are not
+        # path separators on Linux -- normalise so CI fails for real
+        # reasons rather than for path reasons.
+        rel = f.replace("\\", os.sep)
+        c.ok(f"{f} exists on disk", os.path.exists(os.path.join(ADDON_ROOT, rel)))
 
     c.section("Lua loads")
     try:

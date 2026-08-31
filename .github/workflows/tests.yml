@@ -1,0 +1,35 @@
+name: Tests
+
+# Runs the addon's own Lua against the stubbed WoW API on every push and
+# pull request. No secrets, no publishing, no artifacts -- this workflow
+# cannot overwrite or release anything. It only goes red.
+#
+# It exists because these tests otherwise run only when someone remembers to
+# run them, and the things they catch do not announce themselves: the shared
+# stub silently answered "yes" to every question a test asked it, a UI
+# claimed filtering the code never did, and a stale branch would have deleted
+# a whole test suite. None of that showed up as a failure anywhere.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Pinned rather than "latest": lupa ships prebuilt wheels, and on a
+          # Python version too new to have one the job would fall back to
+          # compiling it from source and fail for a reason that has nothing
+          # to do with the addon.
+          python-version: "3.12"
+
+      - name: Install lupa
+        run: pip install lupa
+
+      - name: Run the test suite
+        run: python tests/run_all.py

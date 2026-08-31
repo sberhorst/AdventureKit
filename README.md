@@ -22,7 +22,12 @@ When any merchant window opens, all Poor quality (grey) items in your bags are s
 ### 3. Instance Entry Alerts
 On entering a dungeon or raid, alerts you to:
 - **Missing flask** — checks for any active flask buff
-- **No pet out** — for Hunter, Warlock, Unholy DK
+- **No pet out** — read from your current specialization, not your class.
+  Alerts for BM/Survival Hunter, all Warlock specs, Unholy DK and Frost
+  Mage. Never alerts a Marksmanship Hunter, a Blood or Frost DK, or an
+  Arcane or Fire Mage, none of which keep a permanent pet. A temporary
+  uncontrollable summon (Raise Dead, Army of the Dead) does not count as
+  your pet, so it cannot mask a genuinely missing one
 - **Missing raid-wide buff** — checks your class-specific buff (Mark of the Wild, Battle Shout, Arcane Intellect, etc.)
 
 Alerts fire 3 seconds after entry to let buffs settle post-loading-screen.
@@ -50,7 +55,7 @@ Embedded SpeedTracker v1.9.1 — lightweight draggable frame showing movement sp
 | `/ak repair` | Toggle auto-repair |
 | `/ak guild` | Toggle guild bank repair |
 | `/ak sell` | Toggle auto-sell greys |
-| `/ak alerts` | Toggle instance alerts |
+| `/ak alerts` | Master switch — toggle every alert, including the on-screen HUD |
 | `/ak flask` | Toggle flask alert |
 | `/ak pet` | Toggle pet alert |
 | `/ak buffs` | Toggle raid buff alert |

@@ -39,7 +39,7 @@
 -- Addon identity
 ------------------------------------------------------------------------
 local ADDON_NAME    = "AdventureKit"
-local ADDON_VERSION = "2.4.0"
+local ADDON_VERSION = "2.5.0"
 local PREFIX        = "|cff00ccff[AdventureKit]|r"
 
 ------------------------------------------------------------------------
@@ -51,6 +51,7 @@ local DEFAULTS = {
     autoSellGrey        = true,
     durabilityThreshold = 50,
     durabilityCheck     = true,
+    alertsEnabled       = true,   -- master switch: off silences every alert
     alertInDungeon      = true,   -- fire entry alerts in dungeons/M+
     alertInRaid         = true,   -- fire entry alerts in raids
     alertInDelve        = true,   -- fire entry alerts in delves
@@ -101,8 +102,16 @@ end
 
 -- Guard: returns true if db is ready and we are NOT in combat when
 -- muteInCombat is enabled.  Use before any chat-alert path.
+-- Master gate for every alert the addon raises.
+--
+-- alertsEnabled is checked here rather than at each call site so a new alert
+-- added later is covered by default instead of having to remember. The two
+-- paths that do not route through this function -- the pet death alert,
+-- which deliberately ignores combat muting, and the on-screen HUD -- check
+-- it directly.
 local function AlertsAllowed()
     if not db then return false end
+    if not db.alertsEnabled then return false end
     if db.muteInCombat and InCombatLockdown() then return false end
     return true
 end
@@ -257,19 +266,44 @@ local RAID_BUFF_MAP = {
     ["EVOKER"]      = { { 364342, "Blessing of the Bronze" } },
 }
 
--- Classes with permanent combat pets in WoW 12.x.
--- HUNTER: BM and Survival specs require a pet. MM cannot use Call Pet (Lone Wolf).
---   The addon alerts for all Hunters; the "MM Hunters excluded" note appears in the UI.
--- DEATHKNIGHT: Only Unholy has a permanent ghoul. Blood/Frost DKs do not.
---   We alert for all DKs; the sublabel in the UI clarifies the spec requirement.
--- MAGE: Frost Mage has a permanent Water Elemental combat pet.
---   Fire and Arcane Mages have no permanent pet; they will see a false alert.
---   We cannot detect spec from UnitClass() — the UI sublabel explains this.
-local PET_CLASSES = {
-    ["HUNTER"]      = true,
-    ["WARLOCK"]     = true,
-    ["DEATHKNIGHT"] = true,
-    ["MAGE"]        = true,
+-- Specializations with a permanent, controllable combat pet in WoW 12.x.
+--
+-- This was a class-level table, which alerted every Death Knight, every Mage
+-- and every Hunter regardless of spec. Meanwhile the options UI told the
+-- player "MM Hunters and non-Unholy DKs excluded automatically" — a rule
+-- written in the interface and enforced nowhere. A Blood DK got a permanent
+-- "No pet summoned!" they could not act on, because Blood has no permanent
+-- pet to summon, and the UI told them that case was already handled.
+--
+-- The mapping below is not new game knowledge. It is exactly what this
+-- addon's own comments and options panel have asserted all along, now
+-- enforced in code instead of described next to code that ignored it.
+--
+-- Keyed on the game's globally-unique specialization IDs.
+local PET_SPECS = {
+    -- Hunter: BM and Survival keep a permanent pet.
+    -- Marksmanship is Lone Wolf and cannot Call Pet at all.
+    [253] = true,   -- Beast Mastery
+    [254] = false,  -- Marksmanship
+    [255] = true,   -- Survival
+
+    -- Warlock: every spec has a permanent demon.
+    [265] = true,   -- Affliction
+    [266] = true,   -- Demonology
+    [267] = true,   -- Destruction
+
+    -- Death Knight: only Unholy has a permanent ghoul. Blood and Frost get
+    -- temporary uncontrollable summons (Raise Dead, Army of the Dead) that
+    -- are not something the player maintains between pulls, and that they
+    -- cannot "resummon before pulling" the way the alert asks.
+    [250] = false,  -- Blood
+    [251] = false,  -- Frost
+    [252] = true,   -- Unholy
+
+    -- Mage: only Frost has a permanent Water Elemental.
+    [62]  = false,  -- Arcane
+    [63]  = false,  -- Fire
+    [64]  = true,   -- Frost
 }
 
 ------------------------------------------------------------------------
@@ -412,21 +446,54 @@ local function HasFood()
     return false
 end
 
--- Cache the pet-class result after first successful UnitClass call.
--- UnitClass("player") can return nil during early loading screens.
-local _cachedIsPetClass = nil
-
-local function IsPetClass()
-    if _cachedIsPetClass ~= nil then return _cachedIsPetClass end
-    local ok, result = pcall(function()
-        local _, cf = UnitClass("player")
-        return cf
+-- Current specialization ID, or nil if it cannot be determined yet.
+--
+-- Resolved through both the namespaced and the bare global entry point, and
+-- neither is assumed to exist: patch 12.1 moved several documented globals
+-- into C_ namespaces without warning, and that failure mode was total rather
+-- than graceful.
+local function GetSpecID()
+    local specID
+    SafeCall(function()
+        local index
+        if C_SpecializationInfo and C_SpecializationInfo.GetSpecialization then
+            index = C_SpecializationInfo.GetSpecialization()
+        elseif GetSpecialization then
+            index = GetSpecialization()
+        end
+        if not index then return end
+        if C_SpecializationInfo and C_SpecializationInfo.GetSpecializationInfo then
+            specID = C_SpecializationInfo.GetSpecializationInfo(index)
+        elseif GetSpecializationInfo then
+            specID = GetSpecializationInfo(index)
+        end
     end)
-    if not ok or not result then
+    return specID
+end
+
+-- Cached only once the spec is actually known. Cleared on a spec change,
+-- which matters most for the exact class that prompted this fix: Death
+-- Knights swap between Blood and Unholy constantly, and the answer flips
+-- with them.
+local _cachedNeedsPet = nil
+
+-- True when the player's CURRENT specialization keeps a permanent pet.
+--
+-- Returns false while the spec is unknown, and deliberately does not cache
+-- that answer. The spec is only unknown for a moment during loading, and
+-- every caller runs on a timer several seconds after a zone change.
+--
+-- Failing toward silence is the right direction for an alert. A missed alert
+-- is a small annoyance; an alert the player has no way to act on is the bug
+-- being fixed here, and it is worse than saying nothing.
+local function NeedsPet()
+    if _cachedNeedsPet ~= nil then return _cachedNeedsPet end
+    local specID = GetSpecID()
+    if not specID then
         return false  -- not cached; will retry next call
     end
-    _cachedIsPetClass = (PET_CLASSES[result] == true)
-    return _cachedIsPetClass
+    _cachedNeedsPet = (PET_SPECS[specID] == true)
+    return _cachedNeedsPet
 end
 
 local function PetStatus()
@@ -435,6 +502,22 @@ local function PetStatus()
     local exists = false
     SafeCall(function() exists = UnitExists("pet") == true end)
     if not exists then return "none" end
+
+    -- A temporary, uncontrollable summon is not the pet this alert is about.
+    -- Raise Dead and Army of the Dead put a unit in the "pet" slot for under
+    -- a minute and give the player no pet action bar. Counting one of those
+    -- as "your pet is out" would silence a genuine missing-pet alert for the
+    -- length of a cooldown — and for a Blood DK it made the alert flicker on
+    -- and off with no action available to fix it.
+    --
+    -- Guarded on the function existing, so a client that does not expose it
+    -- behaves exactly as before rather than trading one wrong answer for
+    -- another.
+    if PetHasActionBar then
+        local controllable = true
+        SafeCall(function() controllable = PetHasActionBar() == true end)
+        if not controllable then return "none" end
+    end
 
     -- WoW 12.x: in certain phased/protected combat states (Delves, some
     -- scenario instances), UnitHealth() returns a "secret number" — a
@@ -566,7 +649,7 @@ local function RunInstanceAlerts()
         if not db then return end
         if not AlertsAllowed() then return end
         if not db.alertPet then return end
-        if not IsPetClass() then return end
+        if not NeedsPet() then return end
         local stillIn, iType = IsInInstance()
         if not stillIn or not AlertsEnabledForType(iType) then return end
 
@@ -797,6 +880,10 @@ end
 ------------------------------------------------------------------------
 local function RefreshBuffHUD()
     if not db then return end
+    -- The HUD is an alert surface, so the master switch turns it off too.
+    -- Checked here rather than via AlertsAllowed, since the HUD deliberately
+    -- stays visible during combat.
+    if not db.alertsEnabled then hudFrame:Hide(); return end
     if not db.showBuffHUD then hudFrame:Hide(); return end
 
     local inInstance, iType = IsInInstance()
@@ -806,7 +893,7 @@ local function RefreshBuffHUD()
 
     local flaskOK = HasFlask()
     local foodOK  = HasFood()
-    local petOK   = (not IsPetClass()) or (PetStatus() == "alive")
+    local petOK   = (not NeedsPet()) or (PetStatus() == "alive")
 
     -- Respect the per-alert toggle: if the user disabled an alert,
     -- treat it as OK (hide the row) regardless of actual buff status.
@@ -824,7 +911,7 @@ local function RefreshBuffHUD()
 
     -- Pet row: only show for pet classes with alert enabled,
     -- and not during the post-zone grace period.
-    if db.alertPet and IsPetClass() and not petGraceActive then
+    if db.alertPet and NeedsPet() and not petGraceActive then
         SetRowState(rowPet, not petOK, "No Pet!")
     else
         rowPet:Hide()
@@ -988,6 +1075,11 @@ frame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
 frame:RegisterEvent("UPDATE_INVENTORY_DURABILITY")
 frame:RegisterEvent("UNIT_DIED")
 frame:RegisterEvent("CHALLENGE_MODE_START")  -- fires when M+ key is activated
+-- Whether the player needs a pet is a property of their specialization, not
+-- their class, so the cached answer has to be thrown away when they switch.
+-- This matters most for the class that prompted the fix: a Death Knight
+-- swapping Blood to Unholy goes from "no pet expected" to "pet required".
+frame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
 frame:RegisterUnitEvent("UNIT_AURA", "player")
 
 frame:SetScript("OnEvent", function(self, event, arg1, ...)
@@ -1027,7 +1119,7 @@ frame:SetScript("OnEvent", function(self, event, arg1, ...)
 
     elseif event == "PLAYER_ENTERING_WORLD" then
         durabilityWarned = false
-        _cachedIsPetClass = nil   -- reset so we re-detect after load
+        _cachedNeedsPet = nil   -- reset so we re-detect after load
         petGraceActive    = true  -- suppress pet HUD row until pet loads in
         C_Timer.After(8, function()
             petGraceActive = false
@@ -1035,7 +1127,7 @@ frame:SetScript("OnEvent", function(self, event, arg1, ...)
         end)
         C_Timer.After(2, function()
             if not db then return end
-            IsPetClass()   -- warm cache once player unit is ready
+            NeedsPet()   -- warm cache once player unit is ready
             SafeCall(CheckGearDurability)
             SafeCall(RefreshBuffHUD)
         end)
@@ -1067,7 +1159,7 @@ frame:SetScript("OnEvent", function(self, event, arg1, ...)
         C_Timer.After(10, function()
             if not db then return end
             if not db.alertPet then return end
-            if not IsPetClass() then return end
+            if not NeedsPet() then return end
             local inInstance, iType = IsInInstance()
             if not inInstance or iType ~= "party" then return end
             local ps = PetStatus()
@@ -1077,6 +1169,13 @@ frame:SetScript("OnEvent", function(self, event, arg1, ...)
                 Print("|cffff4444[M+ Timer Started]|r Pet is dead — resurrect before the first pull!")
             end
         end)
+
+    elseif event == "PLAYER_SPECIALIZATION_CHANGED" then
+        -- Fires for group members too; arg1 is the unit.
+        if arg1 == nil or arg1 == "player" then
+            _cachedNeedsPet = nil
+            if db then SafeCall(RefreshBuffHUD) end
+        end
 
     elseif event == "UNIT_AURA" then
         -- Scoped to "player" via RegisterUnitEvent; fires frequently in combat
@@ -1102,9 +1201,14 @@ frame:SetScript("OnEvent", function(self, event, arg1, ...)
         if not ok or not isPet then return end
 
         if not db then return end
+        -- The master switch applies even here. muteInCombat is intentionally
+        -- NOT applied, because pet death is high-priority and always happens
+        -- mid-fight -- but "turn alerts off" has to mean all of them, or the
+        -- one alert that ignores every other suppression rule becomes the
+        -- one the player cannot silence.
+        if not db.alertsEnabled then return end
         if not db.alertPetDeath then return end
-        -- muteInCombat intentionally NOT applied: pet death is high-priority.
-        if not IsPetClass() then return end
+        if not NeedsPet() then return end
         local inInstance, iType = IsInInstance()
         if inInstance and (iType == "party" or iType == "raid") then
             Print("|cffff4444Your pet has died!|r Revive or resummon before the next pull.")
@@ -1124,6 +1228,7 @@ local function ShowHelp()
     print("  |cffffff00/ak dungeon|r     Toggle dungeon alerts (" .. (db.alertInDungeon and "ON" or "OFF") .. ")")
     print("  |cffffff00/ak raid|r        Toggle raid alerts (" .. (db.alertInRaid and "ON" or "OFF") .. ")")
     print("  |cffffff00/ak delve|r       Toggle delve alerts (" .. (db.alertInDelve and "ON" or "OFF") .. ")")
+    print("  |cffffff00/ak alerts|r      Toggle ALL alerts (" .. (db.alertsEnabled and "ON" or "OFF") .. ")")
     print("  |cffffff00/ak flask|r       Toggle flask alert (" .. (db.alertFlask and "ON" or "OFF") .. ")")
     print("  |cffffff00/ak food|r        Toggle food buff alert (" .. (db.alertFood and "ON" or "OFF") .. ")")
     print("  |cffffff00/ak pet|r         Toggle pet entry alert (" .. (db.alertPet and "ON" or "OFF") .. ")")
@@ -1147,6 +1252,7 @@ local function ShowStatus()
     print("  Alert in Dungeons:  " .. (db.alertInDungeon   and "|cff00ff00ON|r" or "|cffff4444OFF|r"))
     print("  Alert in Raids:     " .. (db.alertInRaid      and "|cff00ff00ON|r" or "|cffff4444OFF|r"))
     print("  Alert in Delves:    " .. (db.alertInDelve     and "|cff00ff00ON|r" or "|cffff4444OFF|r"))
+    print("    All Alerts:       " .. (db.alertsEnabled and "|cff00ff00ON|r" or "|cffff4444OFF|r"))
     print("    Flask Alert:      " .. (db.alertFlask       and "|cff00ff00ON|r" or "|cffff4444OFF|r"))
     print("    Food Alert:       " .. (db.alertFood        and "|cff00ff00ON|r" or "|cffff4444OFF|r"))
     print("    Pet Entry Alert:  " .. (db.alertPet         and "|cff00ff00ON|r" or "|cffff4444OFF|r"))
@@ -1179,6 +1285,9 @@ SlashCmdList["ADVENTUREKIT"] = function(input)
     elseif cmd == "dungeon"    then Toggle("alertInDungeon",   "Dungeon alerts")
     elseif cmd == "raid"       then Toggle("alertInRaid",      "Raid alerts")
     elseif cmd == "delve"      then Toggle("alertInDelve",     "Delve alerts")
+    -- Refreshes the HUD too: the master switch hides it, so without this the
+    -- on-screen alerts would stay up until the next unrelated redraw.
+    elseif cmd == "alerts"     then Toggle("alertsEnabled",    "All alerts"); SafeCall(RefreshBuffHUD)
     elseif cmd == "flask"      then Toggle("alertFlask",       "Flask alert")
     elseif cmd == "food"       then Toggle("alertFood",        "Food buff alert")
     elseif cmd == "pet"        then Toggle("alertPet",         "Pet entry alert")
@@ -1363,6 +1472,15 @@ optPanel:SetScript("OnShow", function(self)
         return lbl
     end
 
+    -- ── MASTER SWITCH ────────────────────────────────────────────────
+    -- One control that silences everything below it, including the pet
+    -- death alert and the on-screen HUD. Every individual toggle keeps its
+    -- own setting while this is off, so turning it back on restores the
+    -- player's configuration rather than resetting it.
+    RelCB("Enable alerts", "alertsEnabled", 10,
+        "Master switch — off silences every alert, including the on-screen HUD")
+    Advance(4)
+
     -- ── ALERT WHEN ENTERING ──────────────────────────────────────────
     RelSubHeader("Alert when entering")
     RelCB("Dungeons (including Mythic+)", "alertInDungeon", 24)
@@ -1381,7 +1499,7 @@ optPanel:SetScript("OnShow", function(self)
     RelSubHeader("Pet")
     RelNote("BM/Surv Hunter  ·  Warlock  ·  Unholy DK  ·  Frost Mage", 38)
     RelCB("No pet summoned on entry", "alertPet", 24,
-        "MM Hunters and non-Unholy DKs excluded automatically")
+        "Read from your current spec — MM Hunter, Blood/Frost DK and Arcane/Fire Mage never alert")
     RelCB("Pet died mid-run", "alertPetDeath", 24,
         "Fires even when suppress-in-combat is on")
     Advance(4)

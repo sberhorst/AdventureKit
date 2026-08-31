@@ -38,6 +38,8 @@ Nothing about that is visible in a diff, and the addon still loaded fine.
 | `wow_stub.py` | The fake Blizzard API, plus `load_addon()` and a small assert helper |
 | `test_smoke.py` | Every Lua file in the `.toc` parses and executes; TOC Interface is well-formed; `ADDON_VERSION` matches the TOC `Version` |
 | `test_auras.py` | Flask / food / raid-buff detection, with and without 12.1 secret auras |
+| `ak_stub.py` | AdventureKit's own API surface: specialization lookup, pet state, combat lockdown |
+| `test_pets.py` | Which specs are alerted for a pet, temporary summons, unknown spec, the master alert switch |
 | `run_all.py` | Runs every `test_*.py` here |
 
 ## Writing a test
@@ -74,3 +76,21 @@ assert g.T_HasFlask() is True     # exported local -> T_<name>
 repo containing `tests/`. Copy the folder into Socialite / SpeedTracker /
 ElitistsToolkit, point `test_smoke.py` at that addon's `.toc`, and add stubs
 for whatever APIs it touches that aren't here yet.
+
+## Two fixes carried in from ElitistsToolkit
+
+`wow_stub.py` is shared across AdventureKit, ElitistsToolkit, SpeedTracker and
+Socialite. Two faults were found in it while writing ElitistsToolkit's tests,
+and the corrected file has been copied here.
+
+1. **`stubframe` answered every unknown key with a no-op function.** Functions
+   are truthy in Lua, so any `if frame.mySentinel then` guard saw its own flag
+   already set. Hooks were never installed and the tests went green over code
+   that never ran. Frame *methods* are PascalCase and stashed *fields* are not,
+   so the initial capital is now the split.
+2. **`CreateFrame` discarded the frame's name.** The client publishes a named
+   frame as a global, and addons rely on that, so nothing was reachable by the
+   name it is actually given.
+
+Neither changed AdventureKit's existing results, which were re-run before and
+after the swap. They matter for what can be tested from here on.

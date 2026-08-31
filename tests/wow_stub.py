@@ -129,7 +129,25 @@ stubframe = function()
   function f:CreateFontString() return stubframe() end
   function f:CreateTexture()    return stubframe() end
   function f:CreateLine()       return stubframe() end
-  return setmetatable(f, {__index = function() return function(s) return s end end})
+  -- Unknown METHODS fall through to a no-op that returns the frame, so the
+  -- addon's chained UI setup runs without us enumerating the whole widget
+  -- API. Unknown FIELDS must come back nil.
+  --
+  -- Returning the no-op for every key made `if frame.myCustomFlag then`
+  -- always true, because a function is truthy. That silently defeated every
+  -- "have I already hooked this?" guard an addon stashes on a frame --
+  -- TryHook saw its own sentinel already set and never installed the hook,
+  -- and a cached-overlay lookup returned a function instead of nil. Both
+  -- read as passing tests over code that never ran.
+  --
+  -- Blizzard's frame methods are PascalCase and the fields addons stash on
+  -- frames are not, so the initial capital is the split.
+  return setmetatable(f, {__index = function(_, key)
+    if type(key) == "string" and key:match("^%u") then
+      return function(s) return s end
+    end
+    return nil
+  end})
 end
 _G.stubframe = stubframe
 
@@ -137,9 +155,16 @@ _G.stubframe = stubframe
 -- event to all of them the way the client does, instead of reaching for one
 -- particular frame the addon happens to keep in a local.
 TEST.frames = {}
-CreateFrame  = function()
+-- A NAMED frame is published as a global by the client, and addons rely on
+-- that to find each other's frames. Dropping the name meant any assertion
+-- reaching a frame by its global name failed even though the addon was
+-- doing the right thing.
+CreateFrame  = function(frameType, name, parent, template)
                  local f = stubframe()
                  table.insert(TEST.frames, f)
+                 if type(name) == "string" and name ~= "" then
+                   _G[name] = f
+                 end
                  return f
                end
 UIParent     = stubframe()

@@ -98,6 +98,13 @@ stubframe = function()
     self._point = {p, rel, rp, x or 0, y or 0} return self
   end
   function f:GetPoint() local p = self._point return p[1], p[2], p[3], p[4], p[5] end
+  -- Secure-button attributes carry real state. Without this, GetAttribute
+  -- fell through to the no-op below and returned the frame itself, so a test
+  -- could not tell "this button casts spell X" from "this button does
+  -- nothing" -- which is the entire safety property of a secure action
+  -- button. Setting an attribute to nil clears it, as in the real client.
+  function f:SetAttribute(k, v) self._attrs = self._attrs or {}; self._attrs[k] = v return self end
+  function f:GetAttribute(k)    return self._attrs and self._attrs[k] end
   function f:SetScript(k, fn) self._scripts[k] = fn return self end
   function f:GetScript(k)     return self._scripts[k] end
   function f:HasScript()      return true end

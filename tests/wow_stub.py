@@ -108,6 +108,20 @@ stubframe = function()
   function f:SetScript(k, fn) self._scripts[k] = fn return self end
   function f:GetScript(k)     return self._scripts[k] end
   function f:HasScript()      return true end
+  -- HookScript chains onto whatever is already there, as the client does.
+  -- It used to fall through to the no-op below, so a handler attached this
+  -- way was simply dropped: a test could not fire it, and any assertion
+  -- about "what happens when this frame is shown" was testing nothing.
+  -- Every addon sharing this stub hooks Blizzard frames this way.
+  function f:HookScript(k, fn)
+    local existing = self._scripts[k]
+    if existing then
+      self._scripts[k] = function(...) existing(...) return fn(...) end
+    else
+      self._scripts[k] = fn
+    end
+    return self
+  end
   -- Geometry returns real numbers. Addons do layout arithmetic on these
   -- (`16 / slider:GetWidth()`), and a frame-returning stub turns that into
   -- "attempt to perform arithmetic on a table value" at load time.
